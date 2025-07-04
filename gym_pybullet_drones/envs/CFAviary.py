@@ -39,7 +39,7 @@ class CFAviary(BaseAviary):
                  physics: Physics=Physics.PYB,
                  pyb_freq: int = 1000,
                  ctrl_freq: int = 25,
-                 gui=False,
+                 gui=True,
                  record=False,
                  obstacles=False,
                  user_debug_gui=True,
@@ -156,7 +156,7 @@ class CFAviary(BaseAviary):
         # Initialize controller
         if self.CONTROLLER == 'pid':
             firm.controllerPidInit()
-            print('PID controller init test:', firm.controllerPidTest())
+            # print('PID controller init test:', firm.controllerPidTest())
         elif self.CONTROLLER == 'mellinger':
             firm.controllerMellingerInit()
             assert(self.firmware_freq == 500), "Mellinger controller requires a firmware frequency of 500Hz."
@@ -165,8 +165,8 @@ class CFAviary(BaseAviary):
         # Reset environment 
         init_obs, init_info = super().reset()
         init_pos=np.array([init_obs[0][0], init_obs[0][1], init_obs[0][2]]) # global coord, m
-        init_vel=np.array([init_obs[0][10], init_obs[0][11], init_obs[0][12]]) # global coord, m/s
-        init_rpy = np.array([init_obs[0][7], init_obs[0][8], init_obs[0][9]]) # body coord, rad 
+        init_rpy = np.array([init_obs[0][3], init_obs[0][4], init_obs[0][5]]) # body coord, rad 
+        init_vel=np.array([init_obs[0][6], init_obs[0][7], init_obs[0][8]]) # global coord, m/s
         if self.NUM_DRONES > 1: 
             raise NotImplementedError("Firmware controller wrapper does not support multiple drones.")
 
@@ -184,37 +184,55 @@ class CFAviary(BaseAviary):
 
         return init_obs, init_info
 
-    def step(self, i):
-        '''Step the firmware_wrapper class and its environment. 
-        This function should be called once at the rate of ctrl_freq. Step processes and high level commands, 
-        and runs the firmware loop and simulator according to the frequencies set. 
+    def reset(self, seed=None, options=None):
+        self._step_counter = 0
+        obs, info = self._initalize_cffirmware()
+        return obs, info
 
-        Args: 
-            i: the simulation control step index
-        Todo:
-            * Add support for state estimation 
-        '''
-        t = i / self.ctrl_freq
+    def step(self, action):
+        """Step the environment using the given CTBR action.
 
+        Args:
+            action (np.ndarray): (4,) array: [thrust, roll_rate, pitch_rate, yaw_rate] in [-1, 1] range.
+
+        Returns:
+            obs, reward, terminated, truncated, info
+        """
+        self._step_counter += 1
+        action = self._preprocessAction(action)[0]
+        # print(f"INFO_{self.tick}: Action: {action}, Step: {self._step_counter}")
+        # Renormalize action
+        # Example limits (adjust as needed for your drone/firmware):
+        thrust_min, thrust_max = 20_000, 40_000
+        rate_max = 0.0  # rad/s, max body rate
+
+        thrust = action[0] * (thrust_max - thrust_min) + thrust_min
+        roll_rate = action[1] * rate_max
+        pitch_rate = action[2] * rate_max
+        yaw_rate = action[3] * rate_max
+
+        # Send to firmware as setpoint
+        self._sendRateCmd(thrust, roll_rate, pitch_rate, yaw_rate, self._step_counter / self.ctrl_freq)
+
+        # Step the firmware loop for one ctrl_freq tick
+        t = self._step_counter / self.ctrl_freq
         self._process_command_queue(t)
 
         while self.tick / self.firmware_freq < t + self.ctrl_dt:
-            # Step the environment and print all returned information.
             obs, reward, terminated, truncated, info = super().step(self.action)
-
             # Get state values from pybullet
-            cur_pos=np.array([obs[0][0], obs[0][1], obs[0][2]]) # global coord, m
-            cur_vel=np.array([obs[0][10], obs[0][11], obs[0][12]]) # global coord, m/s
-            cur_rpy = np.array([obs[0][7], obs[0][8], obs[0][9]]) # body coord, rad 
+            cur_pos = np.array([obs[0][0], obs[0][1], obs[0][2]])
+            cur_rpy = np.array([obs[0][3], obs[0][4], obs[0][5]])
+            cur_vel = np.array([obs[0][6], obs[0][7], obs[0][8]])
             body_rot = R.from_euler('XYZ', cur_rpy).inv()
 
             if self.takeoff_sent:
                 self.states += [[self.tick / self.firmware_freq, cur_pos[0], cur_pos[1], cur_pos[2]]]
 
             # Estimate rates 
-            cur_rotation_rates = (cur_rpy - self.prev_rpy) / self.firmware_dt # body coord, rad/s
+            cur_rotation_rates = (cur_rpy - self.prev_rpy) / self.firmware_dt
             self.prev_rpy = cur_rpy
-            cur_acc = (cur_vel - self.prev_vel) / self.firmware_dt / 9.8 + np.array([0, 0, 1]) # global coord
+            cur_acc = (cur_vel - self.prev_vel) / self.firmware_dt / 9.8 + np.array([0, 0, 1])
             self.prev_vel = cur_vel
             
             # Update state 
@@ -258,11 +276,18 @@ class CFAviary(BaseAviary):
 
             self.action = action 
 
+        obs = self._computeObs()
+        # Print position
+        # print(f"INFO_{self.tick}: Position: {obs[0][0]:.2f}, {obs[0][1]:.2f}, {obs[0][2]:.2f} m, Velocity: {obs[0][10]:.2f}, {obs[0][11]:.2f}, {obs[0][12]:.2f} m/s")
+        reward = self._computeReward()
+        terminated = self._computeTerminated()
+        truncated = self._computeTruncated()
+        info = self._computeInfo()
         return obs, reward, terminated, truncated, info
-    
+
     def _update_initial_state(self, obs):
-        self.prev_vel = np.array([obs[10], obs[11], obs[12]])
-        self.prev_rpy = np.array([obs[7], obs[8], obs[9]])
+        self.prev_rpy = np.array([obs[3], obs[4], obs[5]])
+        self.prev_vel = np.array([obs[6], obs[7], obs[8]])
 
 
     ##################################
@@ -689,8 +714,12 @@ class CFAviary(BaseAviary):
 
         """
         #### Action vector ######## P0            P1            P2            P3
-        act_lower_bound = np.array([[0.,           0.,           0.,           0.] for i in range(self.NUM_DRONES)])
-        act_upper_bound = np.array([[self.MAX_RPM, self.MAX_RPM, self.MAX_RPM, self.MAX_RPM] for i in range(self.NUM_DRONES)])
+        # act_lower_bound = np.array([[0.,           0.,           0.,           0.] for i in range(self.NUM_DRONES)])
+        # act_upper_bound = np.array([[self.MAX_RPM, self.MAX_RPM, self.MAX_RPM, self.MAX_RPM] for i in range(self.NUM_DRONES)])
+        
+        #### CTBR Action vector ### Thrust    Roll Rate   Pitch Rate  Yaw Rate
+        act_lower_bound = np.array([[0, -1, -1, -1] for i in range(self.NUM_DRONES)])
+        act_upper_bound = np.array([[1,  1,  1,  1] for i in range(self.NUM_DRONES)])
         return spaces.Box(low=act_lower_bound, high=act_upper_bound, dtype=np.float32)
     
     ################################################################################
@@ -705,8 +734,23 @@ class CFAviary(BaseAviary):
 
         """
         #### Observation vector ### X        Y        Z       Q1   Q2   Q3   Q4   R       P       Y       VX       VY       VZ       WX       WY       WZ       P0            P1            P2            P3
-        obs_lower_bound = np.array([[-np.inf, -np.inf, 0.,     -1., -1., -1., -1., -np.pi, -np.pi, -np.pi, -np.inf, -np.inf, -np.inf, -np.inf, -np.inf, -np.inf, 0.,           0.,           0.,           0.] for i in range(self.NUM_DRONES)])
-        obs_upper_bound = np.array([[np.inf,  np.inf,  np.inf, 1.,  1.,  1.,  1.,  np.pi,  np.pi,  np.pi,  np.inf,  np.inf,  np.inf,  np.inf,  np.inf,  np.inf,  self.MAX_RPM, self.MAX_RPM, self.MAX_RPM, self.MAX_RPM] for i in range(self.NUM_DRONES)])
+        # obs_lower_bound = np.array([[-np.inf, -np.inf, 0.,     -1., -1., -1., -1., -np.pi, -np.pi, -np.pi, -np.inf, -np.inf, -np.inf, -np.inf, -np.inf, -np.inf, 0.,           0.,           0.,           0.] for i in range(self.NUM_DRONES)])
+        # obs_upper_bound = np.array([[np.inf,  np.inf,  np.inf, 1.,  1.,  1.,  1.,  np.pi,  np.pi,  np.pi,  np.inf,  np.inf,  np.inf,  np.inf,  np.inf,  np.inf,  self.MAX_RPM, self.MAX_RPM, self.MAX_RPM, self.MAX_RPM] for i in range(self.NUM_DRONES)])
+
+        #### CTBR Observation vector ### 
+        # X        Y        Z       
+        # R        P        Y       
+        # VX       VY       VZ       
+        # WX       WY       WZ
+        obs_lower_bound = np.array([[-np.inf, -np.inf, -np.inf, 
+                                     -np.pi, -np.pi, -np.pi, 
+                                     -np.inf, -np.inf, -np.inf, 
+                                     -np.inf, -np.inf, -np.inf] for i in range(self.NUM_DRONES)])
+        obs_upper_bound = np.array([[np.inf,  np.inf,  np.inf, 
+                                     np.pi,  np.pi,  np.pi,  
+                                     np.inf,  np.inf,  np.inf,  
+                                     np.inf,  np.inf,  np.inf] for i in range(self.NUM_DRONES)])
+
         return spaces.Box(low=obs_lower_bound, high=obs_upper_bound, dtype=np.float32)
 
     ################################################################################
@@ -751,47 +795,26 @@ class CFAviary(BaseAviary):
     ################################################################################
 
     def _computeReward(self):
-        """Computes the current reward value(s).
-
-        Unused as this subclass is not meant for reinforcement learning.
-
-        Returns
-        -------
-        int
-            Dummy value.
-
-        """
-        return -1
+        """Simple hover reward: negative distance from (0,0,1) and penalty for large angles."""
+        pos = self.state.position
+        target = np.array([0, 0, 1])
+        dist = np.linalg.norm(np.array([pos.x, pos.y, pos.z]) - target)
+        angle_penalty = abs(self.state.attitude.roll) + abs(self.state.attitude.pitch)
+        return 0.1 - dist - 0.1 * angle_penalty
 
     ################################################################################
     
     def _computeTerminated(self):
-        """Computes the current terminated value(s).
-
-        Unused as this subclass is not meant for reinforcement learning.
-
-        Returns
-        -------
-        bool
-            Dummy value.
-
-        """
+        """Terminate if drone falls below z=0.1 or tilts too much."""
+        pos = self.state.position
+        if pos.z < -1 or pos.z > 2.0 or abs(self.state.attitude.roll) > 45 or abs(self.state.attitude.pitch) > 45:
+            return True
         return False
-    
-    ################################################################################
-    
+
     def _computeTruncated(self):
-        """Computes the current truncated value(s).
-
-        Unused as this subclass is not meant for reinforcement learning.
-
-        Returns
-        -------
-        bool
-            Dummy value.
-
-        """
-        return False
+        """Truncate after a fixed number of steps."""
+        max_steps = 1000
+        return self._step_counter >= max_steps
 
     ################################################################################
     

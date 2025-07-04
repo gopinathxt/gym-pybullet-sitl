@@ -71,7 +71,7 @@ class BaseAviary(gym.Env):
 
         """
         #### Constants #############################################
-        self.G = 0 #9.8
+        self.G = 9.8
         self.RAD2DEG = 180/np.pi
         self.DEG2RAD = np.pi/180
         self.CTRL_FREQ = ctrl_freq
@@ -159,12 +159,12 @@ class BaseAviary(gym.Env):
             ret = p.getDebugVisualizerCamera(physicsClientId=self.CLIENT)
             print("viewMatrix", ret[2])
             print("projectionMatrix", ret[3])
-            if self.USER_DEBUG:
-                #### Add input sliders to the GUI ##########################
-                self.SLIDERS = -1*np.ones(4)
-                for i in range(4):
-                    self.SLIDERS[i] = p.addUserDebugParameter("Propeller "+str(i)+" RPM", 0, self.MAX_RPM, self.HOVER_RPM, physicsClientId=self.CLIENT)
-                self.INPUT_SWITCH = p.addUserDebugParameter("Use GUI RPM", 9999, -1, 0, physicsClientId=self.CLIENT)
+            # if self.USER_DEBUG:
+            #     #### Add input sliders to the GUI ##########################
+            #     self.SLIDERS = -1*np.ones(4)
+            #     for i in range(4):
+            #         self.SLIDERS[i] = p.addUserDebugParameter("Propeller "+str(i)+" RPM", 0, self.MAX_RPM, self.HOVER_RPM, physicsClientId=self.CLIENT)
+            #     self.INPUT_SWITCH = p.addUserDebugParameter("Use GUI RPM", 9999, -1, 0, physicsClientId=self.CLIENT)
         else:
             #### Without debug GUI #####################################
             self.CLIENT = p.connect(p.DIRECT)
@@ -194,7 +194,7 @@ class BaseAviary(gym.Env):
         if initial_xyzs is None:
             self.INIT_XYZS = np.vstack([np.array([x*4*self.L for x in range(self.NUM_DRONES)]), \
                                         np.array([y*4*self.L for y in range(self.NUM_DRONES)]), \
-                                        np.ones(self.NUM_DRONES) * (self.COLLISION_H/2-self.COLLISION_Z_OFFSET+.1)]).transpose().reshape(self.NUM_DRONES, 3)
+                                        np.zeros(self.NUM_DRONES) * (self.COLLISION_H/2-self.COLLISION_Z_OFFSET+.1)]).transpose().reshape(self.NUM_DRONES, 3)
         elif np.array(initial_xyzs).shape == (self.NUM_DRONES,3):
             self.INIT_XYZS = initial_xyzs
         else:
@@ -316,29 +316,29 @@ class BaseAviary(gym.Env):
                                     frame_num=int(self.step_counter/self.IMG_CAPTURE_FREQ)
                                     )
         #### Read the GUI's input parameters #######################
-        if self.GUI and self.USER_DEBUG:
-            current_input_switch = p.readUserDebugParameter(self.INPUT_SWITCH, physicsClientId=self.CLIENT)
-            if current_input_switch > self.last_input_switch:
-                self.last_input_switch = current_input_switch
-                self.USE_GUI_RPM = True if self.USE_GUI_RPM == False else False
-        if self.USE_GUI_RPM:
-            for i in range(4):
-                self.gui_input[i] = p.readUserDebugParameter(int(self.SLIDERS[i]), physicsClientId=self.CLIENT)
-            clipped_action = np.tile(self.gui_input, (self.NUM_DRONES, 1))
-            if self.step_counter%(self.PYB_FREQ/2) == 0:
-                self.GUI_INPUT_TEXT = [p.addUserDebugText("Using GUI RPM",
-                                                          textPosition=[0, 0, 0],
-                                                          textColorRGB=[1, 0, 0],
-                                                          lifeTime=1,
-                                                          textSize=2,
-                                                          parentObjectUniqueId=self.DRONE_IDS[i],
-                                                          parentLinkIndex=-1,
-                                                          replaceItemUniqueId=int(self.GUI_INPUT_TEXT[i]),
-                                                          physicsClientId=self.CLIENT
-                                                          ) for i in range(self.NUM_DRONES)]
-        #### Save, preprocess, and clip the action to the max. RPM #
-        else:
-            clipped_action = np.reshape(self._preprocessAction(action), (self.NUM_DRONES, 4))
+        # if self.GUI and self.USER_DEBUG:
+        #     current_input_switch = p.readUserDebugParameter(self.INPUT_SWITCH, physicsClientId=self.CLIENT)
+        #     if current_input_switch > self.last_input_switch:
+        #         self.last_input_switch = current_input_switch
+        #         self.USE_GUI_RPM = True if self.USE_GUI_RPM == False else False
+        # if self.USE_GUI_RPM:
+        #     for i in range(4):
+        #         self.gui_input[i] = p.readUserDebugParameter(int(self.SLIDERS[i]), physicsClientId=self.CLIENT)
+        #     clipped_action = np.tile(self.gui_input, (self.NUM_DRONES, 1))
+        #     if self.step_counter%(self.PYB_FREQ/2) == 0:
+        #         self.GUI_INPUT_TEXT = [p.addUserDebugText("Using GUI RPM",
+        #                                                   textPosition=[0, 0, 0],
+        #                                                   textColorRGB=[1, 0, 0],
+        #                                                   lifeTime=1,
+        #                                                   textSize=2,
+        #                                                   parentObjectUniqueId=self.DRONE_IDS[i],
+        #                                                   parentLinkIndex=-1,
+        #                                                   replaceItemUniqueId=int(self.GUI_INPUT_TEXT[i]),
+        #                                                   physicsClientId=self.CLIENT
+        #                                                   ) for i in range(self.NUM_DRONES)]
+        # #### Save, preprocess, and clip the action to the max. RPM #
+        # else:
+        clipped_action = np.reshape(self._preprocessAction(action), (self.NUM_DRONES, 4))
         #### Repeat for as many as the aggregate physics steps #####
         for _ in range(self.PYB_STEPS_PER_CTRL):
             #### Update and store the drones kinematic info for certain
@@ -558,9 +558,12 @@ class BaseAviary(gym.Env):
             to understand its format.
 
         """
-        state = np.hstack([self.pos[nth_drone, :], self.quat[nth_drone, :], self.rpy[nth_drone, :],
-                           self.vel[nth_drone, :], self.ang_v[nth_drone, :], self.last_clipped_action[nth_drone, :]])
-        return state.reshape(20,)
+        # state = np.hstack([self.pos[nth_drone, :], self.quat[nth_drone, :], self.rpy[nth_drone, :],
+        #                    self.vel[nth_drone, :], self.ang_v[nth_drone, :], self.last_clipped_action[nth_drone, :]])
+        state = np.hstack([self.pos[nth_drone, :], self.rpy[nth_drone, :],
+                           self.vel[nth_drone, :], self.ang_v[nth_drone, :]])
+
+        return state.reshape(12,)
 
     ################################################################################
 
